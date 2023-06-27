@@ -21,6 +21,10 @@ const cards = [
   "tesoura",
 ];
 
+const ROCK = "pedra";
+const PAPER = "papel";
+const SCISSORS = "tesoura";
+
 const usersOnRoom = {};
 const rooms = {};
 
@@ -34,7 +38,7 @@ io.on("connection", (socket) => {
     if (!validLogin) return false;
 
     socket.on("createRoom", () => {
-      if (socket.data.isAdmin) return handleDisconnectRoom(socket);
+      if (socket.data.isAdmin) return handleDisconnectRoom(socket, "Você já esta em uma sala!");
       socket.data.isAdmin = true;
       const roomCode = nanoid(5);
 
@@ -54,7 +58,7 @@ io.on("connection", (socket) => {
       handleEnterRoom(socket, roomCode);
 
       socket.on("start", () => {
-        if (rooms[roomCode].usersCount < 2) {
+        if (rooms[roomCode].usersCount < 2 || rooms[roomCode].cardsSelected.userCard || rooms[roomCode].cardsSelected.oponentCard) {
           return false;
         }
         console.log("start");
@@ -70,23 +74,81 @@ io.on("connection", (socket) => {
 
         socket.to(roomCode).emit("changeCards", rooms[roomCode].oponentCards);
         socket.emit("changeCards", rooms[roomCode].userCards);
+        io.to(roomCode).emit("oponentCards", 3);
+        io.to(roomCode).emit("alreadyPlayed", false);
 
         socket.on("reset", () => {
           resetCards(roomCode);
-          socket.to(roomCode).emit("changeCards", []);
-          socket.emit("changeCards", []);
+          resetPoints(roomCode);
+          io.to(roomCode).emit("oponentCards", 0);
+          io.to(roomCode).emit("changeCards", []);
         });
       });
+
+      socket.on("finish_game", () => {
+        if(!socket.data.isAdmin) return false;
+    
+        const { roomCode } = usersOnRoom[socket.id];
+        const {userCard, oponentCard} = rooms[roomCode].cardsSelected;
+    
+        if(userCard && oponentCard) {
+          const result = handleRPS(rooms[roomCode].cardsSelected);
+    
+          if(result === "empate"){
+            rooms[roomCode].userPoints += 0;
+            rooms[roomCode].oponentPoints += 0;
+            io.to(roomCode).emit("result_game", {
+              points: getRoomPoints(roomCode), 
+              winner: "empate"
+            });
+          } else if(result === "oponente"){
+            rooms[roomCode].oponentPoints += 1;
+            socket.emit("result_game", {
+              points: getRoomPoints(roomCode), 
+              winner: "oponente"
+            });
+            socket.broadcast.emit("result_game", {
+              points: getRoomPoints(roomCode), 
+              winner: "you"
+            });
+          } else if(result === "usuario"){
+            rooms[roomCode].userPoints += 1;
+            socket.emit("result_game", {
+              points: getRoomPoints(roomCode), 
+              winner: "you"
+            });
+            socket.broadcast.emit("result_game", {
+              points: getRoomPoints(roomCode), 
+              winner: "oponente"
+            });
+          }
+    
+          console.log(getRoomPoints(roomCode));
+          
+          socket.emit("cardsMatch", {
+            you: rooms[roomCode].cardsSelected.userCard,
+            oponent: rooms[roomCode].cardsSelected.oponentCard
+          });
+          socket.broadcast.emit("cardsMatch", {
+            oponent: rooms[roomCode].cardsSelected.userCard,
+            you: rooms[roomCode].cardsSelected.oponentCard
+          });
+
+          rooms[roomCode].cardsSelected.userCard = null;
+          rooms[roomCode].cardsSelected.oponentCard = null;
+          io.to(roomCode).emit("alreadyPlayed", false);
+        }
+      })
     });
 
     socket.on("enterRoom", (code) => {
-      if (socket.data.isAdmin) return handleDisconnectRoom(socket);
+      if (socket.data.isAdmin) return handleDisconnectRoom(socket, "Você já esta em uma sala!");
       if (!rooms[code]) {
-        socket.emit("connectionError", "Sala invalida!");
+        handleDisconnectRoom(socket, "Sala invalida!")
         return false;
       }
       if (rooms[code].usersCount === 2) {
-        socket.emit("connectionError", "Sala cheia!");
+        handleDisconnectRoom(socket, "Sala cheia!")
         return false;
       }
 
@@ -96,6 +158,7 @@ io.on("connection", (socket) => {
 
       handleEnterRoom(socket, code);
     });
+
   });
   socket.on("disconnect", () => {
     handleDisconnectRoom(socket);
@@ -107,7 +170,7 @@ function handleEnterRoom(socket, roomCode) {
   socket.join(roomCode);
 
   if (socket.rooms.size > 2) {
-    handleDisconnectRoom(socket);
+    handleDisconnectRoom(socket, "Sala cheia!");
     return;
   }
   const { username, isAdmin } = socket.data;
@@ -125,7 +188,6 @@ function handleEnterRoom(socket, roomCode) {
 
   io.to(roomCode).emit("usersOnline", getUsersInRoom(roomCode));
 
-
   socket.on("selectCard", cardIndex => {
     const { userCards, oponentCards, cardsSelected } = room;
 
@@ -135,9 +197,6 @@ function handleEnterRoom(socket, roomCode) {
     const selectedCard = isAdmin ? userCards[cardIndex] : oponentCards[cardIndex]; 
     const remainingCards = isAdmin ? userCards : oponentCards;
 
-    console.log(selectedCard);
-    console.log(remainingCards);
-
     if(isAdmin){
       cardsSelected.userCard = selectedCard;
     } else {
@@ -146,46 +205,25 @@ function handleEnterRoom(socket, roomCode) {
 
     remainingCards.splice(cardIndex, 1);
     socket.emit("changeCards", remainingCards);
+    socket.broadcast.emit("oponentCards", remainingCards.length);
+    socket.broadcast.emit("alreadyPlayed", true);
     io.to(roomCode).emit("cardSelected", socket.id);
       
-    socket.on("finish_game", () => {
-      if(!isAdmin) return false;
-
-      const {userCard, oponentCard} = cardsSelected;
-
-      if(userCard && oponentCard) {
-        const result = handleRPS(cardsSelected);
-        console.log(result);
-
-        if(result === "empate"){
-          room.userPoints += 0;
-          room.oponentPoints += 0;
-          io.to(roomCode).emit("result_game", {points: getRoomPoints(roomCode), winner: "empate"});
-        } else if(result === "oponente"){
-          room.oponentPoints += 1;
-          io.to(roomCode).emit("result_game", {points: getRoomPoints(roomCode), winner: "oponente"});
-        } else if(result === "usuario"){
-          room.userPoints += 1;
-          io.to(roomCode).emit("result_game", {points: getRoomPoints(roomCode), winner: "usuario"});
-        }
-
-        console.log(getRoomPoints(roomCode));
-
-        cardsSelected.userCard = null;
-        cardsSelected.oponentCard = null;
-      }
-    })
+    
   })
 }
 
-function handleDisconnectRoom(socket) {
-  
+function handleDisconnectRoom(socket, message) {
   if (usersOnRoom.hasOwnProperty(socket.id)) {
     const { roomCode } = usersOnRoom[socket.id];
     resetCards(roomCode);
+    resetPoints(roomCode);
     delete usersOnRoom[socket.id];
 
-    io.to(roomCode).emit("disconnect_room");
+    io.to(roomCode).emit("oponentCards", 0);
+    io.to(roomCode).emit("changeCards", []);
+    io.to(roomCode).emit("cardSelected", 0);
+    io.to(roomCode).emit("alreadyPlayed", false);
     io.to(roomCode).emit("usersOnline", getUsersInRoom(roomCode));
 
     if (rooms[roomCode]) {
@@ -194,6 +232,7 @@ function handleDisconnectRoom(socket) {
     }
   }
 
+  socket.emit("disconnect_error", message);
   socket.disconnect();
   return false;
 }
@@ -225,21 +264,21 @@ function chooseCards(roomCode) {
 function handleRPS(cards) {
   const {userCard, oponentCard} = cards;
   const cardCombos = {
-    "pedra": {
-      "pedra": "empate",
-      "papel": "oponente",
-      "tesoura": "usuario"
+    [ROCK]: {
+      [ROCK]: "empate",
+      [PAPER]: "oponente",
+      [SCISSORS]: "usuario",
     },
-    "papel": {
-      "pedra": "usuario",
-      "papel": "empate",
-      "tesoura": "oponente"
+    [PAPER]: {
+      [ROCK]: "usuario",
+      [PAPER]: "empate",
+      [SCISSORS]: "oponente",
     },
-    "tesoura": {
-      "pedra": "oponente",
-      "papel": "usuario",
-      "tesoura": "empate"
-    }
+    [SCISSORS]: {
+      [ROCK]: "oponente",
+      [PAPER]: "usuario",
+      [SCISSORS]: "empate",
+    },
   };
   return cardCombos[userCard][oponentCard];
 }
@@ -258,24 +297,28 @@ function resetCards(roomCode) {
       userCard: null,
       oponentCard: null
     };
+  };
+}
+
+function resetPoints(roomCode) {
+  if(rooms[roomCode]) {
     rooms[roomCode].userPoints = 0;
     rooms[roomCode].oponentPoints = 0;
-
     io.to(roomCode).emit("result_game", getRoomPoints(roomCode));
-  };
+  }
 }
 
 function validUsername(socket, username) {
   if (!username) {
-    socket.emit("connectionError", new Error("Username invalido!"));
+    handleDisconnectRoom(socket, "Username invalido!");
     return false;
   }
   if (username.length < 3) {
-    socket.emit("connectionError", new Error("Username muito looongo"));
+    handleDisconnectRoom(socket, "Username muito looongo!");
     return false;
   }
   if (username.length > 10) {
-    socket.emit("connectionError", new Error("Username muito curtinho"));
+    handleDisconnectRoom(socket, "Username muito curtinho!");
     return false;
   }
 
